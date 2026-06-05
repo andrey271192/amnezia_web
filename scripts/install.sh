@@ -168,7 +168,7 @@ if docker inspect "${CONTAINER_NAME}" >/dev/null 2>&1; then
   PREV_CONTAINER_ENV="$(docker inspect "${CONTAINER_NAME}" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null || true)"
 fi
 for __reuse_var in UI_HIDE_SECTIONS UI_HIDE_USERS UI_HIDE_WARP UI_HIDE_CASCADE WARP_SSH_INSTALL_DIR \
-  EXPORT_CONFIG_SECRET CLIENT_CONFIG_ENDPOINT CLIENT_EXPORT_DNS1 CLIENT_EXPORT_DNS2; do
+  EXPORT_CONFIG_SECRET CLIENT_CONFIG_ENDPOINT CLIENT_EXPORT_DNS1 CLIENT_EXPORT_DNS2 ENABLE_PRO_TOOLS PANEL_EDITION; do
   if [[ -z "${!__reuse_var:-}" ]] && [[ -n "${PREV_CONTAINER_ENV}" ]]; then
     PREV_VAL=""
     while IFS= read -r __line; do
@@ -223,7 +223,7 @@ for __warp_var in WARP_DIR WARP_CONF_PATH WARP_CLIENTS_LIST AMNEZIA_START_SCRIPT
 done
 
 for __panel_env_var in UI_HIDE_SECTIONS UI_HIDE_USERS UI_HIDE_WARP UI_HIDE_CASCADE UI_HIDE_MTPROTO \
-  EXPORT_CONFIG_SECRET CLIENT_CONFIG_ENDPOINT CLIENT_EXPORT_DNS1 CLIENT_EXPORT_DNS2; do
+  EXPORT_CONFIG_SECRET CLIENT_CONFIG_ENDPOINT CLIENT_EXPORT_DNS1 CLIENT_EXPORT_DNS2 ENABLE_PRO_TOOLS PANEL_EDITION; do
   if [[ -n "${!__panel_env_var:-}" ]]; then
     RUN_ENV+=( -e "${__panel_env_var}=${!__panel_env_var}" )
   fi
@@ -302,7 +302,7 @@ fi
 
 # Выводим пароль в stdout по запросу пользователя.
 # 1) Первый запуск: пароль генерится/приходит через ADMIN_PASSWORD.
-# 2) Переустановка/апгрейд: если есть только password.hash — пароль восстановить нельзя.
+# 2) Переустановка/апгрейд: ADMIN_PASSWORD явно сбрасывает старый hash.
 if [[ -f "${PASS_FILE}" ]]; then
   __pw="$(tr -d '\r\n' <"${PASS_FILE}" || true)"
   if [[ -n "${__pw}" ]]; then
@@ -312,7 +312,7 @@ elif [[ -n "${BOOT_PW}" ]]; then
   echo "Первый пароль: ${BOOT_PW}"
 elif [[ -f "${DATA_DIR}/password.hash" ]]; then
   echo "Пароль уже задан ранее (обнаружен ${DATA_DIR}/password.hash) — текущий пароль восстановить нельзя."
-  echo "Чтобы задать новый пароль: остановите контейнер, удалите ${DATA_DIR}/password.hash и запустите установку с переменной окружения ADMIN_PASSWORD=…"
+  echo "Чтобы задать новый пароль: снова запустите установку с переменной окружения ADMIN_PASSWORD=…"
 fi
 if [[ "${ALLOW_DEFAULT_PASSWORD:-}" == "1" ]] || [[ "${ALLOW_DEFAULT_PASSWORD:-}" == "true" ]]; then
   echo "Пароль по умолчанию (смените в панели): AmneziaAdmin!ChangeMe"

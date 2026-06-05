@@ -134,6 +134,22 @@ curl -fsSL https://raw.githubusercontent.com/andrey271192/amnezia_web/main/scrip
 
 Принудительная пересборка образа: **`NO_CACHE=1`**.
 
+Сброс пароля панели при переустановке:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/andrey271192/amnezia_web/main/scripts/install.sh \
+  | sudo ADMIN_PASSWORD='НОВЫЙ_ПАРОЛЬ' bash
+```
+
+Если старый **`/opt/amnezia-admin-data/password.hash`** уже есть, установщик сделает backup hash, удалит старую сессию и поднимет контейнер с новым паролем.
+
+PRO-инструменты сервера (Cloudflare WARP, каскад, синхронизация времени хоста) включаются явно:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/andrey271192/amnezia_web/main/scripts/install.sh \
+  | sudo ENABLE_PRO_TOOLS=1 bash
+```
+
 ---
 
 ## Удаление
@@ -179,6 +195,10 @@ curl -fsSL https://raw.githubusercontent.com/andrey271192/amnezia_web/main/scrip
 ### Лендинг: порт 80 занят
 
 Если на хосте уже что-то слушает **TCP 80**, установщик сообщит об этом и, при дефолтном **`LANDING_PORT=80`**, сам попробует другой свободный порт (обычно начиная с **8081**). Либо явно: **`LANDING_PORT=8083`**, либо **`SKIP_LANDING=1`**.
+
+### После переустановки пишет «Неверный пароль»
+
+Переустановка сохраняет **`/opt/amnezia-admin-data/password.hash`**, чтобы случайный апгрейд не сбросил доступ. Чтобы намеренно задать новый пароль, передайте **`ADMIN_PASSWORD`** при установке. Старый hash будет сохранён рядом как **`password.hash.bak.*`**.
 
 ### Раздел MTProto или вся панель: ошибка «Not found», API не отвечает
 

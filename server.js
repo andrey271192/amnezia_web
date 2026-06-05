@@ -29,6 +29,11 @@ function envTruthy(v) {
   return s === "1" || s === "true" || s === "yes";
 }
 
+function proToolsEnabled() {
+  const edition = process.env.PANEL_EDITION?.trim().toLowerCase();
+  return envTruthy(process.env.ENABLE_PRO_TOOLS) || edition === "pro";
+}
+
 /** Какие блоки веб-интерфейса скрыты: `UI_HIDE_SECTIONS=users,warp,cascade` или `UI_HIDE_USERS` и т.д. */
 function resolveUiHidden() {
   const raw = process.env.UI_HIDE_SECTIONS?.trim();
@@ -101,19 +106,21 @@ function panelPromoFooterPayload() {
 }
 
 function editionPayload() {
+  const pro = proToolsEnabled();
   return {
     readOnlyClients: false,
     allowDeleteClients: true,
-    showDebugWg: false,
-    proHostTools: false,
+    showDebugWg: pro,
+    proHostTools: pro,
   };
 }
 
 function effectiveUiHidden() {
+  const pro = proToolsEnabled();
   return {
     users: UI_HIDDEN.users,
-    warp: true,
-    cascade: true,
+    warp: UI_HIDDEN.warp || !pro,
+    cascade: UI_HIDDEN.cascade || !pro,
     mtproto: UI_HIDDEN.mtproto,
   };
 }
@@ -424,6 +431,10 @@ function rejectUnavailableFeature(res) {
 }
 
 function requireProTier(_req, res, next) {
+  if (proToolsEnabled()) {
+    next();
+    return;
+  }
   rejectUnavailableFeature(res);
 }
 
