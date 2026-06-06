@@ -105,18 +105,24 @@ fi
 
 BOOT_PW=""
 PASS_FILE="/root/amnezia-admin.initial-password"
-if [[ -f "${DATA_DIR}/password.hash" ]]; then
-  echo "→ В ${DATA_DIR} уже есть password.hash — контейнер поднимется с прежним паролем."
-elif [[ -n "${ADMIN_PASSWORD:-}" ]]; then
+if [[ -n "${ADMIN_PASSWORD:-}" ]]; then
   BOOT_PW="${ADMIN_PASSWORD}"
-  echo "→ Использую ADMIN_PASSWORD из окружения."
-elif [[ "${ALLOW_DEFAULT_PASSWORD:-}" == "1" ]] || [[ "${ALLOW_DEFAULT_PASSWORD:-}" == "true" ]]; then
-  echo "→ ALLOW_DEFAULT_PASSWORD=1 — см. README, пароль по умолчанию для входа."
+  if [[ -f "${DATA_DIR}/password.hash" ]]; then
+    __pw_backup="${DATA_DIR}/password.hash.bak.$(date -u +%Y%m%dT%H%M%SZ)"
+    cp -p "${DATA_DIR}/password.hash" "${__pw_backup}" 2>/dev/null || true
+    rm -f "${DATA_DIR}/password.hash"
+    rm -f "${DATA_DIR}/session.secret"
+    echo "→ ADMIN_PASSWORD задан — сбрасываю старый пароль панели (backup: ${__pw_backup})."
+  else
+    echo "→ Использую ADMIN_PASSWORD из окружения."
+  fi
+elif [[ -f "${DATA_DIR}/password.hash" ]]; then
+  echo "→ В ${DATA_DIR} уже есть password.hash — контейнер поднимется с прежним паролем."
 else
-  BOOT_PW="$(openssl rand -base64 24 | tr -dc 'a-zA-Z0-9' | head -c 22 || openssl rand -hex 16)"
+  BOOT_PW="admin"
   umask 077
   printf '%s\n' "${BOOT_PW}" >"${PASS_FILE}"
-  echo "→ Первый пароль записан в ${PASS_FILE}"
+  echo "→ Первый вход: admin / admin. Смените пароль сразу после входа."
 fi
 
 # AWG_PROFILES: не терять при апдейте без переменной (пропадает список «Инстанс»).
