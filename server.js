@@ -1627,6 +1627,26 @@ if (UI_HIDDEN.users || UI_HIDDEN.warp || UI_HIDDEN.cascade || UI_HIDDEN.mtproto)
     `UI_HIDDEN: users=${UI_HIDDEN.users} warp=${UI_HIDDEN.warp} cascade=${UI_HIDDEN.cascade} mtproto=${UI_HIDDEN.mtproto}`,
   );
 }
+app.use(express.json({ limit: "512kb" }));
+app.use(express.urlencoded({ extended: false, limit: "512kb" }));
+app.use(express.text({ type: "text/plain", limit: "512kb" }));
+
+function normalizeBody(body) {
+  if (!body) return {};
+  if (typeof body === "string") {
+    const raw = body.trim();
+    if (!raw) return {};
+    try {
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === "object") return parsed;
+    } catch {
+      // Old cached clients may post a plain password string.
+    }
+    return { password: raw };
+  }
+  if (typeof body === "object") return body;
+  return {};
+}
 app.get("/health", (_req, res) => {
   res.json({ ok: true, version: PANEL_VERSION });
 });
@@ -2085,9 +2105,13 @@ app.post("/api/warp-cf/xray-apply", requireAuth, requireProTier, async (req, res
 });
 
 app.post("/api/login", (req, res) => {
-  const pw = req.body?.password;
+  const body = normalizeBody(req.body);
+  const pw = body.password;
   if (typeof pw !== "string" || !pw) {
-    res.status(400).json({ error: "password required" });
+    res.status(400).json({
+      error: "password required",
+      hint: "Обновите страницу без кэша (Ctrl+Shift+R). Сервер теперь также принимает старые text/plain login-запросы.",
+    });
     return;
   }
   if (!verifyPassword(pw, passwordHashStored)) {
@@ -2702,5 +2726,4 @@ app.listen(PORT, "0.0.0.0", () => {
 setInterval(() => {
   /* scheduled disconnects not available in basic panel */
 }, SCHEDULER_MS);
-
 
