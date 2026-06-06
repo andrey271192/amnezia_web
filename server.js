@@ -295,22 +295,10 @@ function bootstrapPassword() {
     );
     return;
   }
-  const allowDefault =
-    process.env.ALLOW_DEFAULT_PASSWORD === "1" ||
-    process.env.ALLOW_DEFAULT_PASSWORD === "true";
-  const docPass = process.env.DEFAULT_ADMIN_PASSWORD || "AmneziaAdmin!ChangeMe";
-  if (allowDefault) {
-    passwordHashStored = hashPassword(docPass);
-    fs.writeFileSync(PW_FILE, `${passwordHashStored}\n`, { mode: 0o600 });
-    console.warn(
-      "Включён пароль по умолчанию из документации (README). Смените его в панели и отключите ALLOW_DEFAULT_PASSWORD."
-    );
-    return;
-  }
-  console.error(
-    "Нет пароля: задайте ADMIN_PASSWORD при первом запуске, см. README, или ALLOW_DEFAULT_PASSWORD=1 только для теста."
-  );
-  process.exit(1);
+  const defaultPassword = process.env.DEFAULT_ADMIN_PASSWORD || "admin";
+  passwordHashStored = hashPassword(defaultPassword);
+  fs.writeFileSync(PW_FILE, `${passwordHashStored}\n`, { mode: 0o600 });
+  console.warn("Первый вход: admin / admin. Смените пароль сразу после входа.");
 }
 
 function signSession(payload) {
@@ -2726,4 +2714,3 @@ app.listen(PORT, "0.0.0.0", () => {
 setInterval(() => {
   /* scheduled disconnects not available in basic panel */
 }, SCHEDULER_MS);
-
