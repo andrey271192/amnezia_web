@@ -197,7 +197,7 @@ docker build "${DOCKER_BUILD_EXTRA[@]}" -t amnezia-admin:latest "${INSTALL_DIR}"
 docker rm -f "${CONTAINER_NAME}" 2>/dev/null || true
 
 RUN_ENV=(
-  -e AWG_CONTAINER="${AWG_CONTAINER:-amnezia-awg2}"
+  -e AWG_CONTAINER="${AWG_CONTAINER:-amnezia-awg}"
 )
 
 if [[ -n "${AWG_PROFILES:-}" ]]; then

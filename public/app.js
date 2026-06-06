@@ -1047,7 +1047,7 @@ function renderWarpPanel(data) {
     const hint = document.createElement("p");
     hint.className = "muted warp-muted";
     hint.innerHTML =
-      "Вручную на хосте (root), из каталога репозитория: <code class=\"inline\">bash scripts/warp-amnezia.sh install</code> или с именем контейнера: <code class=\"inline\">bash scripts/warp-amnezia.sh install amnezia-awg2</code>.";
+      "Вручную на хосте (root), из каталога репозитория: <code class=\"inline\">bash scripts/warp-amnezia.sh install</code> или с именем контейнера: <code class=\"inline\">bash scripts/warp-amnezia.sh install amnezia-awg</code>.";
     warpActionsEl.appendChild(hint);
 
     if (!w.hostSshInstall) {

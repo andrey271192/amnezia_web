@@ -127,7 +127,7 @@ function parseProfilesFromEnv() {
       {
         id: "awg",
         label: process.env.AWG_PROFILE_LABEL || "AmneziaWG",
-        container: process.env.AWG_CONTAINER || "amnezia-awg2",
+        container: process.env.AWG_CONTAINER || "amnezia-awg",
         confPath: process.env.AWG_CONF_PATH || "/opt/amnezia/awg/awg0.conf",
         clientsPath: process.env.AWG_CLIENTS_PATH || "/opt/amnezia/awg/clientsTable",
         iface: process.env.AWG_IFACE || "awg0",
