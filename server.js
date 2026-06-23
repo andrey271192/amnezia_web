@@ -773,37 +773,170 @@ function peerUsesWarp(peer, selectedSet) {
   return false;
 }
 
-/** Имя интерфейса для `awg|wg syncconf` и `… show`: при Legacy часто `/…/wg0.conf`, а в env остаётся дефолт `awg0`. */
-function resolveTunnelIface(profile) {
-  const cp = String(profile.confPath || "");
-  const m = cp.match(/\/([^/.]+)\.conf$/);
-  if (m) {
-    const stem = m[1];
-    const low = stem.toLowerCase();
-    if (low === "wg0" || low === "awg0") return stem;
+function uniqueList(items) {
+  return [...new Set(items.filter(Boolean).map(String))];
+}
+
+function ifaceFromConfPath(filePath, fallback) {
+  const base = path.basename(String(filePath || ""));
+  const m = base.match(/^([A-Za-z0-9_.-]+)\.conf$/);
+  return m ? m[1] : fallback;
+}
+
+async function listRunningContainerNames() {
+  try {
+    const { stdout } = await execDocker(["ps", "--format", "{{.Names}}"]);
+    return stdout.split("\n").map((x) => x.trim()).filter(Boolean);
+  } catch {
+    return [];
   }
-  return profile.iface;
+}
+
+async function containerHasFile(name, filePath) {
+  try {
+    await execDocker(["exec", name, "test", "-f", filePath]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function discoverAmneziaContainer(confCandidates, preferredName) {
+  const names = await listRunningContainerNames();
+  const score = (n) => {
+    if (preferredName && n === preferredName) return 0;
+    if (/^amnezia-?awg/i.test(n)) return 1;
+    if (/^amnezia.*wg/i.test(n)) return 2;
+    if (/^amnezia/i.test(n)) return 3;
+    if (/awg|wireguard|wg/i.test(n)) return 4;
+    return 5;
+  };
+  const ordered = [...names].sort((a, b) => score(a) - score(b));
+  for (const n of ordered) {
+    for (const candidate of confCandidates) {
+      if (await containerHasFile(n, candidate)) return n;
+    }
+  }
+  return null;
 }
 
 function createRuntime(profile) {
-  const container = profile.container;
+  let resolvedContainer = null;
+  let resolvedConfPath = null;
+  let resolvedClientsPath = null;
+  let resolvedWgBinary = null;
   const confPath = profile.confPath;
   const clientsPath = profile.clientsPath;
-  const iface = resolveTunnelIface(profile);
+  const iface = profile.iface;
   const wgBinary = profile.wgBinary;
   const pskPath = profile.pskPath;
+  const confCandidates = uniqueList([
+    confPath,
+    "/opt/amnezia/awg/awg0.conf",
+    "/opt/amnezia/awg/wg0.conf",
+    "/opt/amnezia/wireguard/wg0.conf",
+  ]);
+  const clientsCandidates = uniqueList([
+    clientsPath,
+    "/opt/amnezia/awg/clientsTable",
+    "/opt/amnezia/wireguard/clientsTable",
+  ]);
+
+  async function resolveContainer() {
+    if (resolvedContainer) return resolvedContainer;
+    if (profile.container) {
+      for (const candidate of confCandidates) {
+        if (await containerHasFile(profile.container, candidate)) {
+          resolvedContainer = profile.container;
+          return resolvedContainer;
+        }
+      }
+    }
+    const found = await discoverAmneziaContainer(confCandidates, profile.container);
+    if (found) {
+      resolvedContainer = found;
+      return resolvedContainer;
+    }
+    const running = (await listRunningContainerNames()).join(", ") || "(нет запущенных)";
+    throw new Error(
+      `Контейнер AmneziaWG не найден. Профиль указывает «${profile.container}». Запущенные контейнеры: ${running}.`,
+    );
+  }
+
+  async function resolveConfPath() {
+    if (resolvedConfPath) return resolvedConfPath;
+    const container = await resolveContainer();
+    let best = null;
+    for (const candidate of confCandidates) {
+      try {
+        const { stdout } = await execDocker(["exec", container, "cat", candidate]);
+        const parsed = splitAwgConf(stdout);
+        const score = parsed.peers.length * 10 + (candidate === confPath ? 1 : 0);
+        if (!best || score > best.score) best = { path: candidate, score };
+      } catch {
+        /* missing */
+      }
+    }
+    if (!best) throw new Error(`Не найден wg/awg config file: ${confCandidates.join(", ")}`);
+    resolvedConfPath = best.path;
+    return resolvedConfPath;
+  }
+
+  async function resolveClientsPath() {
+    if (resolvedClientsPath) return resolvedClientsPath;
+    const container = await resolveContainer();
+    let best = null;
+    for (const candidate of clientsCandidates) {
+      try {
+        const { stdout } = await execDocker(["exec", container, "cat", candidate]);
+        let parsed = [];
+        try {
+          parsed = parseClientsTable(stdout);
+        } catch {
+          parsed = [];
+        }
+        const score = parsed.length * 10 + (candidate === clientsPath ? 1 : 0);
+        if (!best || score > best.score) best = { path: candidate, score };
+      } catch {
+        /* missing */
+      }
+    }
+    if (!best) throw new Error(`Не найден clientsTable: ${clientsCandidates.join(", ")}`);
+    resolvedClientsPath = best.path;
+    return resolvedClientsPath;
+  }
+
+  async function resolveWgBinary() {
+    if (resolvedWgBinary) return resolvedWgBinary;
+    const container = await resolveContainer();
+    const activeIface = ifaceFromConfPath(resolvedConfPath || confPath, iface);
+    const candidates = uniqueList([wgBinary, activeIface === "wg0" ? "wg" : "", "awg", "wg"]);
+    for (const candidate of candidates) {
+      try {
+        await execDocker(["exec", container, "sh", "-c", `command -v '${candidate}' >/dev/null 2>&1`]);
+        resolvedWgBinary = candidate;
+        return resolvedWgBinary;
+      } catch {
+        /* absent */
+      }
+    }
+    throw new Error(`Не найден wg/awg binary в контейнере ${container}: ${candidates.join(", ")}`);
+  }
 
   async function dockerExec(cmd) {
+    const container = await resolveContainer();
     const { stdout, stderr } = await execDocker(["exec", container, "sh", "-c", cmd]);
     return stdout + stderr;
   }
 
   async function dockerReadFile(remotePath) {
+    const container = await resolveContainer();
     const { stdout } = await execDocker(["exec", container, "cat", remotePath]);
     return stdout;
   }
 
   async function dockerWriteFile(remotePath, content) {
+    const container = await resolveContainer();
     await execDocker(
       [
         "exec",
@@ -819,29 +952,36 @@ function createRuntime(profile) {
 
   async function backupRemoteFiles() {
     const stamp = new Date().toISOString().replace(/[:.]/g, "-");
-    await dockerExec(`cp '${confPath}' '${confPath}.bak-admin-${stamp}' 2>/dev/null || true`);
+    const activeConfPath = await resolveConfPath();
+    const activeClientsPath = await resolveClientsPath();
+    await dockerExec(`cp '${activeConfPath}' '${activeConfPath}.bak-admin-${stamp}' 2>/dev/null || true`);
     await dockerExec(
-      `cp '${clientsPath}' '${clientsPath}.bak-admin-${stamp}' 2>/dev/null || true`
+      `cp '${activeClientsPath}' '${activeClientsPath}.bak-admin-${stamp}' 2>/dev/null || true`
     );
   }
 
   async function applySyncconf() {
+    const activeConfPath = await resolveConfPath();
+    const activeIface = ifaceFromConfPath(activeConfPath, iface);
+    const activeBinary = await resolveWgBinary();
     await dockerExec(
-      `chmod 600 '${confPath}' 2>/dev/null || true` +
-        `; wg-quick strip '${confPath}' > /tmp/wg-admin-strip.conf` +
-        ` && ${wgBinary} syncconf ${iface} /tmp/wg-admin-strip.conf`
+      `chmod 600 '${activeConfPath}' 2>/dev/null || true` +
+        `; wg-quick strip '${activeConfPath}' > /tmp/wg-admin-strip.conf` +
+        ` && ${activeBinary} syncconf ${activeIface} /tmp/wg-admin-strip.conf`
     );
   }
 
   async function loadState() {
+    const activeConfPath = await resolveConfPath();
+    const activeClientsPath = await resolveClientsPath();
     const [confText, tableText] = await Promise.all([
-      dockerReadFile(confPath),
-      dockerReadFile(clientsPath),
+      dockerReadFile(activeConfPath),
+      dockerReadFile(activeClientsPath),
     ]);
     const conf = splitAwgConf(confText);
     const clients = parseClientsTable(tableText);
     const peerByKey = new Map(conf.peers.map((p) => [p.publicKey, p]));
-    return { confText, conf, clients, peerByKey };
+    return { confText, conf, clients, peerByKey, confPath: activeConfPath, clientsPath: activeClientsPath };
   }
 
   async function inferPskFromConf(conf) {
@@ -856,7 +996,16 @@ function createRuntime(profile) {
 
   return {
     profile,
-    tunnelIface: iface,
+    resolveContainer,
+    resolveConfPath,
+    resolveClientsPath,
+    resolveWgBinary,
+    get tunnelIface() {
+      return ifaceFromConfPath(resolvedConfPath || confPath, iface);
+    },
+    get wgBinary() {
+      return resolvedWgBinary || wgBinary;
+    },
     dockerExec,
     dockerReadFile,
     dockerWriteFile,
@@ -864,8 +1013,12 @@ function createRuntime(profile) {
     applySyncconf,
     loadState,
     inferPskFromConf,
-    confPath,
-    clientsPath,
+    get confPath() {
+      return resolvedConfPath || confPath;
+    },
+    get clientsPath() {
+      return resolvedClientsPath || clientsPath;
+    },
   };
 }
 
@@ -902,12 +1055,69 @@ function serializeAwgConf(head, peers) {
 
 function parseClientsTable(raw) {
   const data = JSON.parse(raw);
-  if (!Array.isArray(data)) throw new Error("clientsTable is not an array");
-  return data;
+  return normalizeClientsTableRows(data);
 }
 
 function stringifyClientsTable(rows) {
   return `${JSON.stringify(rows, null, 4)}\n`;
+}
+
+function looksLikePublicKey(s) {
+  return /^[A-Za-z0-9+/=_-]{32,80}$/.test(String(s || "").trim());
+}
+
+function clientRowId(row) {
+  return String(
+    row?.clientId ??
+      row?.id ??
+      row?.publicKey ??
+      row?.public_key ??
+      row?.key ??
+      row?.client_id ??
+      row?.userData?.clientId ??
+      row?.userData?.publicKey ??
+      "",
+  ).trim();
+}
+
+function clientRowUserData(row) {
+  return row?.userData && typeof row.userData === "object" ? row.userData : {};
+}
+
+function normalizeClientTableRow(row, key = "") {
+  if (!row || typeof row !== "object" || Array.isArray(row)) return null;
+  const id = clientRowId(row) || (looksLikePublicKey(key) ? String(key).trim() : "");
+  if (!id) return { ...row };
+  const userData = { ...clientRowUserData(row) };
+  for (const [from, to] of [
+    ["name", "clientName"],
+    ["clientName", "clientName"],
+    ["allowedIps", "allowedIps"],
+    ["allowedIPs", "allowedIps"],
+    ["last_config", "last_config"],
+    ["lastConfig", "last_config"],
+    ["creationDate", "creationDate"],
+  ]) {
+    if (row[from] != null && userData[to] == null) userData[to] = row[from];
+  }
+  return { ...row, clientId: id, userData };
+}
+
+function normalizeClientsTableRows(data) {
+  if (Array.isArray(data)) return data.map((row) => normalizeClientTableRow(row)).filter(Boolean);
+  if (!data || typeof data !== "object") throw new Error("clientsTable JSON is not an object/array");
+  for (const key of ["clients", "users", "rows", "items", "data", "clientList", "clientsTable"]) {
+    if (Array.isArray(data[key])) return data[key].map((row) => normalizeClientTableRow(row)).filter(Boolean);
+  }
+  const out = [];
+  for (const [key, value] of Object.entries(data)) {
+    if (value && typeof value === "object" && !Array.isArray(value)) {
+      const row = normalizeClientTableRow(value, key);
+      if (row) out.push(row);
+    }
+  }
+  if (out.length) return out;
+  throw new Error("clientsTable format not recognized");
 }
 
 /** Совпадает с defaults Amnezia Desktop (protocolConstants awg, desktop MTU). */
@@ -1006,7 +1216,7 @@ async function wgPubkeyFromPrivate(rt, privKeyB64) {
     throw new Error("Некорректный формат приватного ключа сервера в awg0.conf");
   }
   const q = key.replace(/'/g, `'\\''`);
-  const out = await rt.dockerExec(`printf '%s\\n' '${q}' | ${rt.profile.wgBinary} pubkey`);
+  const out = await rt.dockerExec(`printf '%s\\n' '${q}' | ${await rt.resolveWgBinary()} pubkey`);
   const pub = out.trim().split(/\s+/)[0];
   if (!pub) throw new Error("Не удалось получить публичный ключ сервера (wg pubkey).");
   return pub;
@@ -1075,7 +1285,8 @@ async function buildClientConfExport(rt, lc, ifaceMap, req, row, conf) {
   const endpointHost = resolveExportEndpointHost(lc, req);
   const listenPort = ifaceMap.ListenPort ? Number(ifaceMap.ListenPort) : NaN;
   const portNum = Number(pickLc(lc, "port")) || (Number.isFinite(listenPort) ? listenPort : NaN);
-  const defaultPort = rt.profile.wgBinary === "awg" ? 55424 : 51820;
+  const activeBinary = await rt.resolveWgBinary();
+  const defaultPort = activeBinary === "awg" ? 55424 : 51820;
   const port = Number.isFinite(portNum) && portNum > 0 ? portNum : defaultPort;
 
   const dns1 = String(pickLc(lc, "dns1") || process.env.CLIENT_EXPORT_DNS1?.trim() || "8.8.8.8");
@@ -1085,7 +1296,7 @@ async function buildClientConfExport(rt, lc, ifaceMap, req, row, conf) {
   const mtuVal = pickLc(lc, "mtu", "MTU");
   const mtuLine = mtuVal ? `MTU = ${String(mtuVal).trim()}\n` : "";
 
-  if (rt.profile.wgBinary === "awg") {
+  if (activeBinary === "awg") {
     const Jc = String(pickLc(lc, "Jc", "junk_packet_count", "junkPacketCount") ?? AWG_EXPORT_DEFAULTS.Jc);
     const Jmin = String(pickLc(lc, "Jmin", "junk_packet_min_size", "junkPacketMinSize") ?? AWG_EXPORT_DEFAULTS.Jmin);
     const Jmax = String(pickLc(lc, "Jmax", "junk_packet_max_size", "junkPacketMaxSize") ?? AWG_EXPORT_DEFAULTS.Jmax);
@@ -1175,13 +1386,14 @@ function parseIpv4ToParts(ip) {
 }
 
 async function awgGenKeypair(rt) {
-  const privOut = await rt.dockerExec(`${rt.profile.wgBinary} genkey`);
+  const activeBinary = await rt.resolveWgBinary();
+  const privOut = await rt.dockerExec(`${activeBinary} genkey`);
   const priv = privOut.trim().split(/\s+/)[0];
   if (!priv || !/^[A-Za-z0-9+/=_-]+$/.test(priv)) {
     throw new Error("Не удалось сгенерировать ключ клиента (genkey).");
   }
   const q = priv.replace(/'/g, `'\\''`);
-  const pubOut = await rt.dockerExec(`printf '%s\\n' '${q}' | ${rt.profile.wgBinary} pubkey`);
+  const pubOut = await rt.dockerExec(`printf '%s\\n' '${q}' | ${activeBinary} pubkey`);
   const pub = pubOut.trim().split(/\s+/)[0];
   if (!pub) throw new Error("Не удалось получить публичный ключ клиента.");
   return { priv, pub };
@@ -1275,7 +1487,7 @@ async function disableClient(rt, clientId, ts) {
   }
   const nextPeers = conf.peers.filter((p) => p.publicKey !== clientId);
   const nextConfText = serializeAwgConf(conf.head, nextPeers);
-  const idx = clients.findIndex((c) => c.clientId === clientId);
+  const idx = clients.findIndex((c) => clientRowId(c) === clientId);
   if (idx === -1) throw new Error("Client not in clientsTable");
   const ud = { ...(clients[idx].userData || {}) };
   ud.disabled = true;
@@ -1297,10 +1509,11 @@ async function processScheduledDisconnects(rt) {
   for (const c of clients) {
     const ud = c.userData || {};
     const iso = ud.scheduledTunnelDisconnectAt;
-    if (!iso || !peerByKey.get(c.clientId)) continue;
+    const rowId = clientRowId(c);
+    if (!iso || !peerByKey.get(rowId)) continue;
     const t = new Date(iso).getTime();
     if (Number.isNaN(t) || t > now) continue;
-    due.push({ clientId: c.clientId, ts: new Date(iso).toISOString() });
+    due.push({ clientId: rowId, ts: new Date(iso).toISOString() });
   }
   if (!due.length) return;
   await rt.backupRemoteFiles();
@@ -2174,7 +2387,7 @@ app.get("/api/clients", requireAuth, async (req, res) => {
   try {
     let wgShow = "";
     try {
-      wgShow = await rt.dockerExec(`${rt.profile.wgBinary} show ${rt.tunnelIface}`);
+      wgShow = await rt.dockerExec(`${await rt.resolveWgBinary()} show ${rt.tunnelIface}`);
     } catch {
       wgShow = "";
     }
@@ -2184,9 +2397,9 @@ app.get("/api/clients", requireAuth, async (req, res) => {
     );
     const { conf, clients, peerByKey } = await rt.loadState();
     const rows = clients.map((c) => {
-      const id = c.clientId;
+      const id = clientRowId(c);
       const peer = peerByKey.get(id);
-      const ud = c.userData || {};
+      const ud = clientRowUserData(c);
       const activeInConf = !!peer;
       return {
         clientId: id,
@@ -2279,7 +2492,7 @@ async function serveClientConfigExport(req, res) {
   }
   try {
     const { conf, clients } = await rt.loadState();
-    const row = clients.find((c) => c.clientId === clientId);
+    const row = clients.find((c) => clientRowId(c) === clientId);
     if (!row) {
       res.status(404).json({ error: "Клиент не найден в clientsTable" });
       return;
@@ -2359,7 +2572,7 @@ app.post("/api/clients/create-cascade", requireAuth, requireProTier, async (req,
       endpointPort =
         Number.isFinite(listenPort) && listenPort > 0
           ? listenPort
-          : rt.profile.wgBinary === "awg"
+          : (await rt.resolveWgBinary()) === "awg"
             ? 55424
             : 51820;
     }
@@ -2372,7 +2585,7 @@ app.post("/api/clients/create-cascade", requireAuth, requireProTier, async (req,
 
     const serverPub = await wgPubkeyFromPrivate(rt, ifaceMap.PrivateKey);
     const { priv, pub } = await awgGenKeypair(rt);
-    if (clients.some((c) => c.clientId === pub)) {
+    if (clients.some((c) => clientRowId(c) === pub)) {
       res.status(409).json({ error: "Коллизия ключей — попробуйте ещё раз." });
       return;
     }
@@ -2550,7 +2763,7 @@ app.post("/api/clients/enable", requireAuth, async (req, res) => {
     if (existing) {
       return res.status(409).json({ error: "Peer already enabled" });
     }
-    const idx = clients.findIndex((c) => c.clientId === clientId);
+    const idx = clients.findIndex((c) => clientRowId(c) === clientId);
     if (idx === -1) {
       return res.status(404).json({ error: "Client not in clientsTable" });
     }
@@ -2602,7 +2815,7 @@ app.post("/api/clients/disconnect-date", requireAuth, async (req, res) => {
   const scheduleTunnelDisconnect = Boolean(req.body?.scheduleTunnelDisconnect);
   try {
     const { clients, peerByKey } = await rt.loadState();
-    const idx = clients.findIndex((c) => c.clientId === clientId);
+    const idx = clients.findIndex((c) => clientRowId(c) === clientId);
     if (idx === -1) return res.status(404).json({ error: "Client not in clientsTable" });
     const peer = peerByKey.get(clientId);
     const ud = { ...(clients[idx].userData || {}) };
@@ -2644,7 +2857,7 @@ app.post("/api/clients/rename", requireAuth, async (req, res) => {
   }
   try {
     const { clients } = await rt.loadState();
-    const idx = clients.findIndex((c) => c.clientId === clientId);
+    const idx = clients.findIndex((c) => clientRowId(c) === clientId);
     if (idx === -1) return res.status(404).json({ error: "Client not in clientsTable" });
     const ud = { ...(clients[idx].userData || {}), clientName: name };
     clients[idx] = { ...clients[idx], userData: ud };
@@ -2664,7 +2877,7 @@ app.post("/api/clients/delete", requireAuth, async (req, res) => {
     await rt.backupRemoteFiles();
     const { conf, clients } = await rt.loadState();
     const nextPeers = conf.peers.filter((p) => p.publicKey !== clientId);
-    const nextClients = clients.filter((c) => c.clientId !== clientId);
+    const nextClients = clients.filter((c) => clientRowId(c) !== clientId);
     if (nextClients.length === clients.length) {
       return res.status(404).json({ error: "Client not in clientsTable" });
     }
